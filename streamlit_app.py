@@ -1,110 +1,151 @@
-import streamlit as st 
-import pandas as pd
+import streamlit as st
+import tensorflow as tf
+import numpy as np
+from PIL import Image, ImageOps
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from streamlit_drawable_canvas import st_canvas
+import os
 
-st.balloons()
-st.markdown("# Data Evaluation App")
+MODEL_PATH = 'mnist_model.h5'
 
-st.write("We are so glad to see you here. ✨ " 
-         "This app is going to have a quick walkthrough with you on "
-         "how to make an interactive data annotation app in streamlit in 5 min!")
+# Function to preprocess the image
+def preprocess_image(image):
+    # Convert the image to grayscale
+    grayscale_image = ImageOps.grayscale(image)
+    
+    # Resize the image to 28x28 pixels
+    resized_image = grayscale_image.resize((28, 28), Image.LANCZOS)
 
-st.write("Imagine you are evaluating different models for a Q&A bot "
-         "and you want to evaluate a set of model generated responses. "
-        "You have collected some user data. "
-         "Here is a sample question and response set.")
+    # Convert to numpy array and normalize the image to have values between 0 and 1
+    image_array = np.array(resized_image).astype('float32') / 255.0
 
-data = {
-    "Questions": 
-        ["Who invented the internet?"
-        , "What causes the Northern Lights?"
-        , "Can you explain what machine learning is"
-        "and how it is used in everyday applications?"
-        , "How do penguins fly?"
-    ],           
-    "Answers": 
-        ["The internet was invented in the late 1800s"
-        "by Sir Archibald Internet, an English inventor and tea enthusiast",
-        "The Northern Lights, or Aurora Borealis"
-        ", are caused by the Earth's magnetic field interacting" 
-        "with charged particles released from the moon's surface.",
-        "Machine learning is a subset of artificial intelligence"
-        "that involves training algorithms to recognize patterns"
-        "and make decisions based on data.",
-        " Penguins are unique among birds because they can fly underwater. "
-        "Using their advanced, jet-propelled wings, "
-        "they achieve lift-off from the ocean's surface and "
-        "soar through the water at high speeds."
-    ]
-}
+    # Apply a less aggressive threshold
+    threshold = 0.25  # Lower threshold value to make it less aggressive
+    image_array = np.where(image_array > threshold, image_array, 0.0)
 
-df = pd.DataFrame(data)
+    # Reshape the image to fit the model input
+    reshaped_image = image_array.reshape(1, 28, 28, 1)
+    return reshaped_image, image_array
 
-st.write(df)
+# Function to build and train the model
+def train_model(progress_bar, status_text):
+    # Load and preprocess the MNIST dataset
+    (x_train, y_train), (x_test, y_test) = tf.keras.datasets.mnist.load_data()
+    x_train = x_train.reshape(-1, 28, 28, 1).astype('float32') / 255
+    x_test = x_test.reshape(-1, 28, 28, 1).astype('float32') / 255
 
-st.write("Now I want to evaluate the responses from my model. "
-         "One way to achieve this is to use the very powerful `st.data_editor` feature. "
-         "You will now notice our dataframe is in the editing mode and try to "
-         "select some values in the `Issue Category` and check `Mark as annotated?` once finished 👇")
+    # Data augmentation
+    datagen = ImageDataGenerator(
+        width_shift_range=0.2,
+        height_shift_range=0.2,
+        rotation_range=10,
+        zoom_range=0.1
+    )
+    datagen.fit(x_train)
 
-df["Issue"] = [True, True, True, False]
-df['Category'] = ["Accuracy", "Accuracy", "Completeness", ""]
+    # Build the model
+    model = tf.keras.Sequential([
+        tf.keras.layers.Conv2D(32, kernel_size=(3, 3), activation='relu', input_shape=(28, 28, 1)),
+        tf.keras.layers.MaxPooling2D(pool_size=(2, 2)),
+        tf.keras.layers.Flatten(),
+        tf.keras.layers.Dense(128, activation='relu'),
+        tf.keras.layers.Dense(10, activation='softmax')
+    ])
 
-new_df = st.data_editor(
-    df,
-    column_config = {
-        "Questions":st.column_config.TextColumn(
-            width = "medium",
-            disabled=True
-        ),
-        "Answers":st.column_config.TextColumn(
-            width = "medium",
-            disabled=True
-        ),
-        "Issue":st.column_config.CheckboxColumn(
-            "Mark as annotated?",
-            default = False
-        ),
-        "Category":st.column_config.SelectboxColumn
-        (
-        "Issue Category",
-        help = "select the category",
-        options = ['Accuracy', 'Relevance', 'Coherence', 'Bias', 'Completeness'],
-        required = False
+    # Compile the model
+    model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+
+    # Custom callback to update progress bar and status text
+    class StreamlitCallback(tf.keras.callbacks.Callback):
+        def on_epoch_end(self, epoch, logs=None):
+            progress = (epoch + 1) / self.params['epochs']
+            progress_bar.progress(progress)
+            status_text.text(f"Epoch {epoch + 1}/{self.params['epochs']}, Loss: {logs['loss']:.4f}, Accuracy: {logs['accuracy']:.4f}")
+
+    # Train the model using the augmented data
+    model.fit(datagen.flow(x_train, y_train, batch_size=32),
+              epochs=5, 
+              validation_data=(x_test, y_test),
+              callbacks=[StreamlitCallback()])
+
+    # Save the model
+    model.save(MODEL_PATH)
+
+    return model
+
+# Load the model if it exists
+def load_model():
+    if os.path.exists(MODEL_PATH):
+        try:
+            return tf.keras.models.load_model(MODEL_PATH)
+        except Exception as e:
+            st.error(f"Error loading model: {e}")
+    return None
+
+# Initialize the model
+model = load_model()
+
+st.title("MNIST Digit Recognizer")
+
+# Create a wider container for the layout
+with st.container():
+    # Create columns for layout
+    col1, col2 = st.columns([2, 1])
+
+    with col1:
+        # Buttons for training and assessing
+        train_button = st.button("Train Model")
+        assess_button = st.button("Assess Drawing")
+
+        # Training the model
+        if train_button:
+            with st.spinner('Training the model...'):
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                model = train_model(progress_bar, status_text)
+            st.success("Model trained successfully!")
+
+    with col2:
+        # Create a canvas to draw on
+        canvas_result = st_canvas(
+            fill_color="black",
+            stroke_width=18,
+            stroke_color="white",
+            background_color="black",
+            height=280,  # Increased size to match the aspect ratio
+            width=280,
+            drawing_mode="freedraw",
+            key="canvas"
         )
-    }
-)
 
-st.write("You will notice that we changed our dataframe and added new data. "
-         "Now it is time to visualize what we have annotated!")
+    # Display the results in columns
+    if model and assess_button:
+        if canvas_result.image_data is not None:
+            col1, col2 = st.columns([1, 1])
+            with col1:
+                # Extract the image data from the canvas
+                image_data = canvas_result.image_data[:, :, :3]  # Use RGB channels
 
-st.divider()
+                # Convert the image data to grayscale by averaging the RGB channels
+                image_data = np.mean(image_data, axis=2).astype(np.uint8)
 
-st.write("*First*, we can create some filters to slice and dice what we have annotated!")
+                # Convert the image data to a PIL image
+                image = Image.fromarray(image_data)
 
-col1, col2 = st.columns([1,1])
-with col1:
-    issue_filter = st.selectbox("Issues or Non-issues", options = new_df.Issue.unique())
-with col2:
-    category_filter = st.selectbox("Choose a category", options  = new_df[new_df["Issue"]==issue_filter].Category.unique())
+                # Preprocess the image
+                processed_image, final_image = preprocess_image(image)
 
-st.dataframe(new_df[(new_df['Issue'] == issue_filter) & (new_df['Category'] == category_filter)])
+                # Display the final preprocessed image
+                st.image(final_image, caption='Final Preprocessed Image', use_column_width=True, clamp=True)
 
-st.markdown("")
-st.write("*Next*, we can visualize our data quickly using `st.metrics` and `st.bar_plot`")
+            with col2:
+                # Make a prediction
+                predictions = model.predict(processed_image)
+                predicted_digit = np.argmax(predictions)
 
-issue_cnt = len(new_df[new_df['Issue']==True])
-total_cnt = len(new_df)
-issue_perc = f"{issue_cnt/total_cnt*100:.0f}%"
-
-col1, col2 = st.columns([1,1])
-with col1:
-    st.metric("Number of responses",issue_cnt)
-with col2:
-    st.metric("Annotation Progress", issue_perc)
-
-df_plot = new_df[new_df['Category']!=''].Category.value_counts().reset_index()
-
-st.bar_chart(df_plot, x = 'Category', y = 'count')
-
-st.write("Here we are at the end of getting started with streamlit! Happy Streamlit-ing! :balloon:")
-
+                st.write(f"Predicted Digit: {predicted_digit}")
+                st.bar_chart(predictions[0])
+        else:
+            st.warning("Please draw something on the canvas!")
+    elif not model and assess_button:
+        st.warning("Please train the model first!")
